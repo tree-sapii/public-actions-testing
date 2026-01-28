@@ -1,0 +1,135 @@
+name: Interpret NavWarns
+on:
+  workflow_run:
+    workflows:
+      - Fetch NavWarns
+    types:
+      - completed
+  workflow_dispatch: null
+jobs:
+  list_navwarns:
+    runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.collect.outputs.files }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: collect
+        run: |
+          files=$(ls current/navwarns/*.json | jq -R -s -c 'split("\n")[:-1]')
+          {
+            echo "files=$files"
+          } >> "$GITHUB_OUTPUT"
+  interpret_navwarns:
+    needs: list_navwarns
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        file: ${{ fromJSON(needs.list_navwarns.outputs.files) }}
+      max-parallel: 2
+    continue-on-error: true
+    permissions:
+      contents: write
+      models: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Random sleep to stagger API calls
+        run: |
+          delay=$((RANDOM % 40 + 5)) # sleep 5-45 seconds
+          echo "Sleeping $delay seconds..."
+          sleep $delay
+      - name: Extract body from GeoJSON properties and store in a variable
+        id: navwarn_body
+        run: >
+          body=$(jq -r '.properties.body | gsub("\n"; " ")' "${{ matrix.file
+          }}")
+
+          echo "body=$body" >> "$GITHUB_OUTPUT"
+      - name: Run AI inference
+        id: inference
+        uses: actions/ai-inference@v1
+        with:
+          model: gpt-4.1
+          prompt-file: classification.prompt.yml
+          max-tokens: 1024
+          input: |
+            navwarn: |
+              ${{ steps.navwarn_body.outputs.body }}
+      - name: Join inferred coordinates with original GeoJSON
+        run: |
+          base=$(basename "${{ matrix.file }}")
+          jq --slurpfile r "${{ steps.inference.outputs.response-file }}" '
+            .properties = (.properties // {}) 
+            | .properties.category = $r[0].category
+            | .properties.title = $r[0].title
+          ' "${{ matrix.file }}" > "classified_${base}"
+      - name: Validate json we just created
+        run: |
+          base=$(basename "${{ matrix.file }}");
+          f="classified_${base}";
+          echo "Checking $f"
+          jq empty "$f" || { echo "Invalid JSON in $f"; rm -v "$f"; exit 1; }
+          # if length of geometry.coordinates is 0, delete
+          if [ "$(jq '.geometry.coordinates | length' "$f")" -eq 0 ]; then
+            echo "Deleting empty coordinate file $f"
+            rm -v "$f"
+          fi
+      - name: Derive safe artifact name
+        id: artifact_name
+        run: |
+          # Get just the base filename, no path
+          filename=$(basename "${{ matrix.file }}")
+          # Replace any remaining invalid characters with underscores
+          safe_name=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
+          echo "safe_name=$safe_name" >> $GITHUB_OUTPUT
+      - name: Upload coordinate file as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: classified-${{ steps.artifact_name.outputs.safe_name }}
+          path: classified_*.json
+  commit:
+    runs-on: ubuntu-latest
+    needs: interpret_navwarns
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+      - name: Download all coordinate files
+        uses: actions/download-artifact@v4
+        with:
+          path: current/enriched_navwarns
+          merge-multiple: true
+      - name: Merge all JSON coordinates into GeoJSON FeatureCollection
+        run: >
+          tree -h current/enriched_navwarns
+
+          files=$(find current/enriched_navwarns -name '*.json') 
+
+          jq -s '{ "type": "FeatureCollection", "features": . }' $files >
+          current/navwarns.geojson
+      - name: Fail if no coordinate files found
+        run: |
+          echo "Looking for JSON files in current/enriched_navwarns"
+          files=$(find current/enriched_navwarns -name '*.json')
+          if [ -z "$files" ]; then
+            echo "❌ No JSON coordinate files found. Failing job."
+            exit 1
+          else
+            echo "✅ Found $(echo "$files" | wc -l) JSON files."
+          fi
+      - name: Commit merged collection
+        run: >
+          git config user.name  "github-actions[bot]"
+
+          git config user.email
+          "41898282+github-actions[bot]@users.noreply.github.com"
+
+          cp current/navwarns.geojson docs/navwarns.geojson || echo "Copy
+          failed"
+
+          git add docs/navwarns.geojson current/navwarns.geojson
+
+          git commit -m "Update merged NavWarn FeatureCollection" || echo "No
+          changes"
+
+          git push

@@ -1,0 +1,157 @@
+name: Issue Management
+on:
+  issues:
+    types:
+      - opened
+      - reopened
+      - edited
+      - labeled
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+permissions:
+  issues: write
+  pull-requests: write
+  models: read
+  contents: read
+jobs:
+  ai-triage:
+    if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name,
+      'status/needs-triage')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: AI Issue Assessment
+        id: ai-assessment
+        uses: github/ai-assessment-comment-labeler@v1.0.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue_number: ${{ github.event.issue.number }}
+          issue_body: ${{ github.event.issue.body }}
+          repo_name: ${{ github.event.repository.name }}
+          owner: ${{ github.repository_owner }}
+          ai_review_label: status/needs-triage
+          prompts_directory: ./.github/prompts
+          labels_to_prompts_mapping: kind/bug,bug-triage.prompt.yml|kind/enhancement,enhancement-triage.prompt.yml
+          model: openai/gpt-4o-mini
+          max_tokens: 300
+      - name: Post Assessment Summary
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          ASSESSMENT_OUTPUT: ${{ steps.ai-assessment.outputs.ai_assessments }}
+        with:
+          script: >
+            const assessments = JSON.parse(process.env.ASSESSMENT_OUTPUT ||
+            '[]');
+
+            if (assessments.length > 0) {
+              let summary = '## 🤖 AI Triage Assessment\n\n';
+              for (const assessment of assessments) {
+                summary += `### ${assessment.prompt}\n`;
+                summary += `**Label Applied:** \`${assessment.assessmentLabel}\`\n\n`;
+                summary += `**Assessment:**\n${assessment.response}\n\n`;
+                summary += '---\n\n';
+              }
+              core.summary.addRaw(summary);
+              await core.summary.write();
+            }
+  summarize-to-slack:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize Issue
+        id: summarize-issue
+        uses: actions/ai-inference@v1
+        with:
+          model: gpt-4o-mini
+          prompt: |
+            Analyze this GitHub issue and provide a concise summary:
+
+            Title: ${{ github.event.issue.title }}
+            Body: ${{ github.event.issue.body }}
+
+            Please provide:
+            1. A brief summary of the issue (2-3 sentences)
+            2. Key technical points or concerns
+            3. Suggested priority level (low/medium/high)
+
+            Keep the response under 150 words and focus on actionable insights.
+        continue-on-error: true
+      - name: Check Slack Configuration
+        run: >
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "❌ SLACK_WEBHOOK_URL secret is not set"
+            echo "Please add your Slack webhook URL to repository secrets"
+            exit 1
+          else
+            echo "✅ SLACK_WEBHOOK_URL secret is configured"
+            echo "Webhook URL starts with: $(echo '${{ secrets.SLACK_WEBHOOK_URL }}' | cut -c1-30)..."
+            echo "Full webhook URL format check:"
+            if [[ "${{ secrets.SLACK_WEBHOOK_URL }}" == https://hooks.slack.com/services/* ]]; then
+              echo "✅ Webhook URL format looks correct"
+            else
+              echo "❌ Webhook URL format may be incorrect"
+              echo "Expected format: https://hooks.slack.com/services/..."
+            fi
+          fi
+      - name: Determine Priority Color
+        id: priority-color
+        run: >
+          if [[ "${{ github.event.issue.labels.*.name }}" ==
+          *"priority/critical"* ]]; then
+            echo "color=danger" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.issue.labels.*.name }}" == *"priority/high"*
+          ]]; then
+            echo "color=warning" >> $GITHUB_OUTPUT
+          else
+            echo "color=good" >> $GITHUB_OUTPUT
+          fi
+      - name: Format Labels
+        id: format-labels
+        run: >
+          labels="${{ github.event.issue.labels.*.name }}"
+
+          if [ -n "$labels" ] && [ "$labels" != "null" ]; then
+            # Convert array format to comma-separated string
+            formatted_labels=$(echo "$labels" | tr -d '[]' | tr ',' '\n' | tr -d ' ' | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
+            echo "labels=$formatted_labels" >> $GITHUB_OUTPUT
+          else
+            echo "labels=None" >> $GITHUB_OUTPUT
+          fi
+      - name: Push to Slack
+        run: >
+          # Create the message content
+
+          message="🚨 New Issue Created\n\n📋 **Issue #${{
+          github.event.issue.number }}: ${{ github.event.issue.title }}**\n🔗
+          Link: ${{ github.event.issue.html_url }}\n\n📁 **Repository:** ${{
+          github.repository }}\n👤 **Author:** ${{ github.event.issue.user.login
+          }}\n🏷️ **Labels:** ${{ steps.format-labels.outputs.labels }}\n\n🤖
+          **AI Summary:**\n${{ steps.summarize-issue.outputs.response || 'AI
+          analysis unavailable - check issue details manually' }}"
+
+
+          # Send to Slack using curl
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$message\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true
+      - name: Check Slack Result
+        run: >
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Slack notification sent successfully"
+          else
+            echo "❌ Slack notification failed"
+            echo "This could be due to:"
+            echo "1. Incorrect webhook URL format"
+            echo "2. Expired or deactivated webhook"
+            echo "3. Wrong Slack workspace/channel"
+            echo "4. Network connectivity issues"
+            echo ""
+            echo "Please verify your SLACK_WEBHOOK_URL secret in repository settings"
+          fi

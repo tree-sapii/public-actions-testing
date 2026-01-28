@@ -1,0 +1,26 @@
+name: Summarize new issues
+on:
+  workflow_dispatch: null
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      models: read
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run AI inference
+        id: inference
+        uses: actions/ai-inference@v1
+        with:
+          prompt: |
+            Summarize the following GitHub issue in one paragraph:
+            wo yao pika chu
+      - name: Comment with AI summary
+        run: |
+          echo '${{ steps.inference.outputs.response }}'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESPONSE: ${{ steps.inference.outputs.response }}

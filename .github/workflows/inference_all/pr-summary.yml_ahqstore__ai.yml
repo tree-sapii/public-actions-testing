@@ -1,0 +1,29 @@
+name: Summarize PR Changes
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run AI inference
+        id: inference
+        uses: actions/ai-inference@v1
+        with:
+          prompt: >
+            Summarize all the PR File Changes and package additions in PULL
+            REQUEST Number:
+
+            ${{ github.event.pull_request.id }}
+      - name: Comment with AI summary
+        run: >
+          gh pe comment $PR_NUMBER --body '${{ steps.inference.outputs.response
+          }}'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RESPONSE: ${{ steps.inference.outputs.response }}
