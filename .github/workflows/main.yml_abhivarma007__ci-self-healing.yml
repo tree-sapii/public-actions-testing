@@ -1,0 +1,50 @@
+name: AI Inference
+on: workflow_dispatch
+permissions:
+  contents: read
+  models: read
+jobs:
+  inference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/ai-inference@v1
+        with:
+          prompt: .github/models/one.prompt.yml
+          enable-github-mcp: false
+          token: ${{ github.token }}
+          github-mcp-token: ${{ secrets.MCP_TOKEN }}
+          input: |
+            logs: ${{ env.log-file }}
+          env:
+            log-file: >
+              2025-10-09T13:59:20.4899672Z [36;1mecho "Error: Something went
+              wrong here!"[0m
+
+              2025-10-09T13:59:20.4902068Z [36;1mecho "Build failed with exit
+              code 1"[0m
+
+              2025-10-09T13:59:20.4903990Z [36;1mexit 1[0m
+
+              2025-10-09T13:59:20.4962690Z shell: /usr/bin/bash -e {0}
+
+              2025-10-09T13:59:20.4964337Z ##[endgroup]
+
+              2025-10-09T13:59:20.5259487Z Starting test job...
+
+              2025-10-09T13:59:20.5265218Z This is a test log line 1
+
+              2025-10-09T13:59:20.5266821Z This is a test log line 2
+
+              2025-10-09T13:59:20.5270143Z Error: Something went wrong here!
+
+              2025-10-09T13:59:20.5271305Z Build failed with exit code 1
+
+              2025-10-09T13:59:20.5284924Z ##[error]Process completed with exit
+              code 1.
+
+              2025-10-09T13:59:20.5545930Z Post job cleanup.
+
+              2025-10-09T13:59:20.6566358Z [command]/usr/bin/git version
+
+              2025-10-09T13:59:20.6611731Z git version 2.51.0

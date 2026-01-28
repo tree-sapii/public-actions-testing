@@ -1,0 +1,83 @@
+name: “Summarize CodeQL Issues”
+on:
+  schedule:
+    - cron: 0 0 * * *
+permissions:
+  contents: read
+  issues: write
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Fetch open CodeQL issues
+        id: list
+        uses: actions/github-script@v6
+        with:
+          script: >
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: 'codeql'
+            });
+
+            if (issues.length === 0) {
+              return '';
+            }
+
+            // "- #123: 제목 (URL)" 형태로 리스트화
+
+            return issues.map(i => `- #${i.number}: ${i.title}
+            (${i.html_url})`).join('\n');
+      - name: Skip if no CodeQL issues
+        if: ${{ steps.list.outputs.result == '' }}
+        run: echo "No open CodeQL issues – nothing to do."
+      - name: Summarize with AI
+        if: ${{ steps.list.outputs.result != '' }}
+        id: inference
+        uses: actions/ai-inference@v1
+        with:
+          prompt: |
+            다음은 “codeql” 라벨이 붙은 GitHub 이슈 목록입니다. 
+            한 문단으로 요약해 주세요.
+
+            ${{ steps.list.outputs.result }}
+      - name: Create or update summary issue
+        if: ${{ steps.list.outputs.result != '' }}
+        uses: actions/github-script@v6
+        with:
+          script: >
+            const title = "CodeQL Issues Summary";
+
+            const body  = `## 📋 Daily CodeQL Issues Summary\n\n${{
+            steps.inference.outputs.response }}`;
+
+            // (1) 열린 이슈 중 제목이 같은 것이 있는지 찾아보고
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open'
+            });
+
+            let summary = open.find(i => i.title === title);
+
+            if (summary) {
+              // (2) 있으면 본문만 업데이트
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: summary.number,
+                body
+              });
+            } else {
+              // (3) 없으면 새로 만듦
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                title,
+                body
+              });
+            }
